@@ -1,4 +1,4 @@
 User-agent: *
-Disallow:
+Allow: /
 
-Sitemap: https://store-king-esport-production.up.railway.app/sitemap.xml
+Sitemap: https://king-store-esport-production.up.railway.app/sitemap.xml
