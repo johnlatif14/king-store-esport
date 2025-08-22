@@ -5,9 +5,10 @@ const session = require("express-session");
 const sqlite3 = require("sqlite3").verbose();
 const nodemailer = require("nodemailer");
 const path = require("path");
-const multer = require('multer');
-const fs = require('fs');
-require('dotenv').config();
+const multer = require("multer");
+const fs = require("fs");
+const axios = require("axios");
+require("dotenv").config();
 
 const app = express();
 
@@ -21,36 +22,40 @@ const db = new sqlite3.Database("./data.db", sqlite3.OPEN_READWRITE | sqlite3.OP
 });
 
 // إعدادات الميدل وير
-app.use(cors({ 
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'https://king-store-esport-production.up.railway.app'],
-  credentials: true 
+app.use(cors({
+  origin: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://king-store-esport-production.up.railway.app"
+  ],
+  credentials: true
 }));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, "public")));
 
 // إعداد الجلسة
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'default-secret-key', // تم التحديث لاستخدام SESSION_SECRET من .env
+  secret: process.env.SESSION_SECRET || "default-secret-key",
   resave: false,
   saveUninitialized: true,
-  cookie: { 
+  cookie: {
     secure: false,
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000,
-    sameSite: 'lax'
+    sameSite: "lax"
   }
 }));
 
 // إنشاء مجلد uploads إذا لم يكن موجوداً
-if (!fs.existsSync('public/uploads')) {
-  fs.mkdirSync('public/uploads', { recursive: true });
+if (!fs.existsSync("public/uploads")) {
+  fs.mkdirSync("public/uploads", { recursive: true });
 }
 
 // إعداد multer لرفع الملفات
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'public/uploads/');
+    cb(null, "public/uploads/");
   },
   filename: (req, file, cb) => {
     cb(null, Date.now() + path.extname(file.originalname));
@@ -93,7 +98,7 @@ db.serialize(() => {
 
 // إعداد البريد الإلكتروني
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  service: "gmail",
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
@@ -102,36 +107,86 @@ const transporter = nodemailer.createTransport({
 
 // Routes لخدمة صفحات HTML
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.get("/login", (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  res.sendFile(path.join(__dirname, "public", "login.html"));
 });
 
 app.get("/dashboard", (req, res) => {
   if (!req.session.admin) {
-    return res.redirect('/login');
+    return res.redirect("/login");
   }
-  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+  res.sendFile(path.join(__dirname, "public", "dashboard.html"));
 });
 
-// API Routes
-app.post("/api/order", upload.single('screenshot'), (req, res) => {
+// ========================= Kashier Payment Integration =========================
+app.post("/api/payment", async (req, res) => {
+  const { amount, currency, orderId, customerEmail } = req.body;
+
+  if (!amount || !currency || !orderId || !customerEmail) {
+    return res.status(400).json({ success: false, message: "جميع الحقول مطلوبة" });
+  }
+
+  try {
+    const response = await axios.post("https://checkout.kashier.io/api/v2/orders", {
+      amount: amount,
+      currency: currency,
+      merchantId: process.env.KASHIER_MERCHANT_ID,
+      orderId: orderId,
+      redirectUrl: `https://yourdomain.com/api/payment/callback`, // عدلها حسب الدومين بتاعك
+      customer: {
+        email: customerEmail,
+      },
+    }, {
+      headers: {
+        Authorization: `Bearer ${process.env.KASHIER_API_KEY}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    res.json({
+      success: true,
+      checkoutUrl: response.data.redirectUrl // لينك الدفع
+    });
+  } catch (error) {
+    console.error("Kashier Payment Error:", error.response?.data || error.message);
+    res.status(500).json({ success: false, message: "فشل إنشاء عملية الدفع" });
+  }
+});
+
+// Callback من كاشير
+app.post("/api/payment/callback", (req, res) => {
+  const { orderId, paymentStatus } = req.body;
+
+  if (paymentStatus === "SUCCESS") {
+    db.run("UPDATE orders SET status = 'تم الدفع' WHERE id = ?", [orderId]);
+  } else {
+    db.run("UPDATE orders SET status = 'فشل الدفع' WHERE id = ?", [orderId]);
+  }
+
+  res.json({ success: true });
+});
+
+// ========================= API Routes =========================
+
+// إنشاء طلب
+app.post("/api/order", upload.single("screenshot"), (req, res) => {
   const { name, playerId, email, ucAmount, bundle, totalAmount, transactionId } = req.body;
-  
+
   if (!name || !playerId || !email || !transactionId || !totalAmount || (!ucAmount && !bundle)) {
     return res.status(400).json({ success: false, message: "جميع الحقول مطلوبة" });
   }
 
   const type = ucAmount ? "UC" : "Bundle";
   const screenshot = req.file ? `/uploads/${req.file.filename}` : null;
-  
+
   db.run(
     `INSERT INTO orders (name, playerId, email, type, ucAmount, bundle, totalAmount, transactionId, screenshot) 
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [name, playerId, email, type, ucAmount, bundle, totalAmount, transactionId, screenshot],
-    function(err) {
+    function (err) {
       if (err) {
         console.error(err);
         return res.status(500).json({ success: false, message: "حدث خطأ أثناء الحفظ" });
@@ -141,9 +196,10 @@ app.post("/api/order", upload.single('screenshot'), (req, res) => {
   );
 });
 
+// استفسار
 app.post("/api/inquiry", async (req, res) => {
   const { email, message } = req.body;
-  
+
   if (!email || !message) {
     return res.status(400).json({ success: false, message: "البريد والرسالة مطلوبان" });
   }
@@ -154,7 +210,7 @@ app.post("/api/inquiry", async (req, res) => {
       [email, message],
       async function(err) {
         if (err) return res.status(500).json({ success: false, message: "خطأ في قاعدة البيانات" });
-        
+
         await transporter.sendMail({
           from: `"فريق الدعم" <${process.env.SMTP_USER}>`,
           to: process.env.SMTP_USER,
@@ -168,7 +224,7 @@ app.post("/api/inquiry", async (req, res) => {
             </div>
           `,
         });
-        
+
         res.json({ success: true });
       }
     );
@@ -178,9 +234,10 @@ app.post("/api/inquiry", async (req, res) => {
   }
 });
 
+// اقتراح
 app.post("/api/suggestion", async (req, res) => {
   const { name, contact, message } = req.body;
-  
+
   if (!name || !contact || !message) {
     return res.status(400).json({ success: false, message: "جميع الحقول مطلوبة" });
   }
@@ -191,7 +248,7 @@ app.post("/api/suggestion", async (req, res) => {
       [name, contact, message],
       async function(err) {
         if (err) return res.status(500).json({ success: false, message: "خطأ في قاعدة البيانات" });
-        
+
         await transporter.sendMail({
           from: `"اقتراح جديد" <${process.env.SMTP_USER}>`,
           to: process.env.SMTP_USER,
@@ -206,7 +263,7 @@ app.post("/api/suggestion", async (req, res) => {
             </div>
           `,
         });
-        
+
         res.json({ success: true });
       }
     );
@@ -216,16 +273,19 @@ app.post("/api/suggestion", async (req, res) => {
   }
 });
 
-// Admin Routes
-app.post('/api/admin/login', (req, res) => {
+// ========================= Admin Routes =========================
+
+// تسجيل دخول الأدمن
+app.post("/api/admin/login", (req, res) => {
   const { username, password } = req.body;
   if (username === process.env.ADMIN_USER && password === process.env.ADMIN_PASS) {
     req.session.admin = true;
     return res.json({ success: true });
   }
-  res.status(401).json({ success: false, message: 'بيانات الدخول غير صحيحة' });
+  res.status(401).json({ success: false, message: "بيانات الدخول غير صحيحة" });
 });
 
+// تسجيل خروج الأدمن
 app.post("/api/admin/logout", (req, res) => {
   req.session.destroy(err => {
     if (err) {
@@ -235,9 +295,10 @@ app.post("/api/admin/logout", (req, res) => {
   });
 });
 
+// عرض الطلبات
 app.get("/api/admin/orders", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   db.all("SELECT * FROM orders ORDER BY id DESC", (err, rows) => {
     if (err) {
       console.error(err);
@@ -247,9 +308,10 @@ app.get("/api/admin/orders", (req, res) => {
   });
 });
 
+// عرض الاستفسارات
 app.get("/api/admin/inquiries", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   db.all("SELECT * FROM inquiries ORDER BY created_at DESC", (err, rows) => {
     if (err) {
       console.error(err);
@@ -259,9 +321,10 @@ app.get("/api/admin/inquiries", (req, res) => {
   });
 });
 
+// عرض الاقتراحات
 app.get("/api/admin/suggestions", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   db.all("SELECT * FROM suggestions ORDER BY created_at DESC", (err, rows) => {
     if (err) {
       console.error(err);
@@ -271,9 +334,10 @@ app.get("/api/admin/suggestions", (req, res) => {
   });
 });
 
+// تحديث حالة الطلب
 app.post("/api/admin/update-status", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   const { id, status } = req.body;
   if (!id || !status) {
     return res.status(400).json({ success: false, message: "معرّف الطلب والحالة مطلوبان" });
@@ -292,9 +356,10 @@ app.post("/api/admin/update-status", (req, res) => {
   );
 });
 
+// حذف طلب
 app.delete("/api/admin/delete-order", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   const { id } = req.body;
   if (!id) {
     return res.status(400).json({ success: false, message: "معرّف الطلب مطلوب" });
@@ -309,9 +374,10 @@ app.delete("/api/admin/delete-order", (req, res) => {
   });
 });
 
+// حذف استفسار
 app.delete("/api/admin/delete-inquiry", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   const { id } = req.body;
   if (!id) {
     return res.status(400).json({ success: false, message: "معرّف الاستفسار مطلوب" });
@@ -326,9 +392,10 @@ app.delete("/api/admin/delete-inquiry", (req, res) => {
   });
 });
 
+// حذف اقتراح
 app.delete("/api/admin/delete-suggestion", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
-  
+
   const { id } = req.body;
   if (!id) {
     return res.status(400).json({ success: false, message: "معرّف الاقتراح مطلوب" });
@@ -343,6 +410,7 @@ app.delete("/api/admin/delete-suggestion", (req, res) => {
   });
 });
 
+// رد على استفسار
 app.post("/api/admin/reply-inquiry", async (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -377,6 +445,7 @@ app.post("/api/admin/reply-inquiry", async (req, res) => {
   }
 });
 
+// إرسال رسالة لعميل
 app.post("/api/admin/send-message", async (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -409,6 +478,7 @@ app.post("/api/admin/send-message", async (req, res) => {
   }
 });
 
+// ========================= Start Server =========================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
