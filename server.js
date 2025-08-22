@@ -23,7 +23,7 @@ const db = new sqlite3.Database("./data.db", sqlite3.OPEN_READWRITE | sqlite3.OP
 
 // إعدادات الميدل وير
 app.use(cors({ 
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'https://store-king-esport-production.up.railway.app'],
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'https://king-store-esport-production.up.railway.app'],
   credentials: true 
 }));
 // يجب أن يكون bodyParser.json() لـ webhooks قبل التحقق من التوقيع إذا كان Cashier يتطلب ذلك
