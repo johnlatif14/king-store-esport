@@ -12,56 +12,18 @@ require("dotenv").config();
 
 const app = express();
 
-// إعداد قاعدة البيانات
-const db = new sqlite3.Database("./data.db", sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
-  if (err) {
-    console.error("Error opening database:", err.message);
-    process.exit(1);
+// ========================= Database =========================
+const db = new sqlite3.Database(
+  "./data.db",
+  sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE,
+  (err) => {
+    if (err) {
+      console.error("Error opening database:", err.message);
+      process.exit(1);
+    }
+    console.log("Connected to SQLite database");
   }
-  console.log("Connected to SQLite database");
-});
-
-// إعدادات الميدل وير
-app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://king-store-esport-production.up.railway.app"
-  ],
-  credentials: true
-}));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
-
-// إعداد الجلسة
-app.use(session({
-  secret: process.env.SESSION_SECRET || "default-secret-key",
-  resave: false,
-  saveUninitialized: true,
-  cookie: {
-    secure: false,
-    httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000,
-    sameSite: "lax"
-  }
-}));
-
-// إنشاء مجلد uploads إذا لم يكن موجوداً
-if (!fs.existsSync("public/uploads")) {
-  fs.mkdirSync("public/uploads", { recursive: true });
-}
-
-// إعداد multer لرفع الملفات
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "public/uploads/");
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
-});
-const upload = multer({ storage });
+);
 
 // إنشاء الجداول
 db.serialize(() => {
@@ -96,7 +58,47 @@ db.serialize(() => {
   )`);
 });
 
-// إعداد البريد الإلكتروني
+// ========================= Middleware =========================
+app.use(cors({
+  origin: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://king-store-esport-production.up.railway.app",
+  ],
+  credentials: true,
+}));
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// بعض مزودي الدفع ممكن يرسلوا callback كـ form urlencoded
+app.use("/api/payment/callback", bodyParser.urlencoded({ extended: true }));
+app.use("/api/payment/callback", bodyParser.json());
+
+app.use(express.static(path.join(__dirname, "public")));
+
+app.use(session({
+  secret: process.env.SESSION_SECRET || "default-secret-key",
+  resave: false,
+  saveUninitialized: true,
+  cookie: {
+    secure: false,
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000,
+    sameSite: "lax",
+  },
+}));
+
+// ========================= Uploads (multer) =========================
+if (!fs.existsSync("public/uploads")) {
+  fs.mkdirSync("public/uploads", { recursive: true });
+}
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, "public/uploads/"),
+  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
+});
+const upload = multer({ storage });
+
+// ========================= Mail + Telegram =========================
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -105,7 +107,38 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Routes لخدمة صفحات HTML
+async function sendTelegramMessage(text) {
+  try {
+    if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) return;
+    await axios.post(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      { chat_id: process.env.TELEGRAM_CHAT_ID, text }
+    );
+  } catch (err) {
+    console.error("Telegram error:", err?.response?.data || err.message);
+  }
+}
+
+async function sendEmail(subject, text) {
+  try {
+    const recipients = (process.env.NOTIFICATION_EMAIL || "")
+      .split(",")
+      .map((e) => e.trim())
+      .filter(Boolean);
+    if (recipients.length === 0) return;
+
+    await transporter.sendMail({
+      from: `"King STORE" <${process.env.SMTP_USER}>`,
+      to: recipients,
+      subject,
+      text,
+    });
+  } catch (err) {
+    console.error("Email error:", err?.response?.data || err.message);
+  }
+}
+
+// ========================= Pages =========================
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
@@ -122,6 +155,7 @@ app.get("/dashboard", (req, res) => {
 });
 
 // ========================= Kashier Payment Integration =========================
+// إنشاء عملية دفع (Order) في Kashier — تُرجع رابط الدفع للعميل
 app.post("/api/payment", async (req, res) => {
   const { amount, currency, orderId, customerEmail } = req.body;
 
@@ -130,48 +164,76 @@ app.post("/api/payment", async (req, res) => {
   }
 
   try {
-    const response = await axios.post("https://checkout.kashier.io/api/v2/orders", {
-      amount: amount,
-      currency: currency,
-      merchantId: process.env.KASHIER_MERCHANT_ID,
-      orderId: orderId,
-      redirectUrl: `https://yourdomain.com/api/payment/callback`, // عدلها حسب الدومين بتاعك
-      customer: {
-        email: customerEmail,
+    const response = await axios.post(
+      "https://checkout.kashier.io/api/v2/orders",
+      {
+        amount: amount,
+        currency: currency,
+        merchantId: process.env.KASHIER_MERCHANT_ID,
+        orderId: String(orderId),
+        redirectUrl: `${process.env.BASE_URL || "https://yourdomain.com"}/api/payment/callback`,
+        customer: { email: customerEmail },
       },
-    }, {
-      headers: {
-        Authorization: `Bearer ${process.env.KASHIER_API_KEY}`,
-        "Content-Type": "application/json"
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.KASHIER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 20000,
       }
-    });
+    );
 
-    res.json({
-      success: true,
-      checkoutUrl: response.data.redirectUrl // لينك الدفع
-    });
+    // حسب استجابة Kashier — بنرجّع رابط الدفع
+    const checkoutUrl =
+      response.data?.redirectUrl ||
+      response.data?.url ||
+      response.data?.checkoutUrl;
+
+    if (!checkoutUrl) {
+      throw new Error("Checkout URL not returned from Kashier");
+    }
+
+    res.json({ success: true, checkoutUrl });
   } catch (error) {
-    console.error("Kashier Payment Error:", error.response?.data || error.message);
+    console.error("Kashier Payment Error:", error?.response?.data || error.message);
     res.status(500).json({ success: false, message: "فشل إنشاء عملية الدفع" });
   }
 });
 
-// Callback من كاشير
+// Callback/Webhook من كاشير لتحديث حالة الطلب
+// ملاحظة: حسب إعداداتك في Kashier قد تستقبل حقول مختلفة (paymentStatus / success / status)
+// هنا هندعم القيم الشائعة.
 app.post("/api/payment/callback", (req, res) => {
-  const { orderId, paymentStatus } = req.body;
+  const body = req.body || {};
+  const orderId = body.orderId || body.merchantOrderId || body.id;
+  const paymentStatus = (body.paymentStatus || body.status || "").toString().toUpperCase();
 
-  if (paymentStatus === "SUCCESS") {
-    db.run("UPDATE orders SET status = 'تم الدفع' WHERE id = ?", [orderId]);
-  } else {
-    db.run("UPDATE orders SET status = 'فشل الدفع' WHERE id = ?", [orderId]);
-  }
+  if (!orderId) return res.status(400).json({ success: false, message: "Invalid callback (missing orderId)" });
 
-  res.json({ success: true });
+  const successStatuses = new Set(["SUCCESS", "PAID", "CAPTURED"]);
+  const isSuccess = successStatuses.has(paymentStatus);
+
+  const status = isSuccess ? "تم الدفع" : "فشل الدفع";
+
+  db.run(`UPDATE orders SET status = ? WHERE id = ?`, [status, orderId], function (err) {
+    if (err) {
+      console.error("DB error:", err.message);
+      return res.status(500).json({ success: false, message: "DB error" });
+    }
+
+    const msg = `💳 تحديث حالة الدفع
+🆔 رقم الطلب: ${orderId}
+📌 الحالة: ${status}`;
+    sendTelegramMessage(msg);
+    sendEmail("تحديث حالة الدفع", msg);
+
+    // ممكن تعيد توجيه العميل لصفحة نجاح/فشل دفع حسب رغبتك
+    res.json({ success: true });
+  });
 });
 
 // ========================= API Routes =========================
-
-// إنشاء طلب
+// إنشاء طلب (UC أو Bundle)
 app.post("/api/order", upload.single("screenshot"), (req, res) => {
   const { name, playerId, email, ucAmount, bundle, totalAmount, transactionId } = req.body;
 
@@ -185,12 +247,26 @@ app.post("/api/order", upload.single("screenshot"), (req, res) => {
   db.run(
     `INSERT INTO orders (name, playerId, email, type, ucAmount, bundle, totalAmount, transactionId, screenshot) 
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [name, playerId, email, type, ucAmount, bundle, totalAmount, transactionId, screenshot],
+    [name, playerId, email, type, ucAmount || null, bundle || null, totalAmount, transactionId, screenshot],
     function (err) {
       if (err) {
         console.error(err);
         return res.status(500).json({ success: false, message: "حدث خطأ أثناء الحفظ" });
       }
+
+      // إشعارات عند إنشاء الطلب
+      const notifyText = `📦 طلب جديد (${type})
+👤 الاسم: ${name}
+🆔 ID: ${playerId}
+📧 الإيميل: ${email}
+${ucAmount ? `💰 UC: ${ucAmount}` : `🎁 الباقة: ${bundle}`}
+💵 السعر: ${totalAmount}
+#️⃣ رقم المعاملة: ${transactionId}
+🧾 صورة: ${screenshot ? screenshot : "لا يوجد"}`;
+
+      sendTelegramMessage(notifyText);
+      sendEmail("طلب جديد", notifyText);
+
       res.json({ success: true, id: this.lastID });
     }
   );
@@ -208,9 +284,10 @@ app.post("/api/inquiry", async (req, res) => {
     db.run(
       "INSERT INTO inquiries (email, message) VALUES (?, ?)",
       [email, message],
-      async function(err) {
+      async function (err) {
         if (err) return res.status(500).json({ success: false, message: "خطأ في قاعدة البيانات" });
 
+        // بريد للإدارة
         await transporter.sendMail({
           from: `"فريق الدعم" <${process.env.SMTP_USER}>`,
           to: process.env.SMTP_USER,
@@ -224,6 +301,13 @@ app.post("/api/inquiry", async (req, res) => {
             </div>
           `,
         });
+
+        // إشعارات تليجرام + إيميل عام
+        const text = `❓ استفسار جديد
+📧 ${email}
+💬 ${message}`;
+        sendTelegramMessage(text);
+        sendEmail("استفسار جديد", text);
 
         res.json({ success: true });
       }
@@ -246,7 +330,7 @@ app.post("/api/suggestion", async (req, res) => {
     db.run(
       "INSERT INTO suggestions (name, contact, message) VALUES (?, ?, ?)",
       [name, contact, message],
-      async function(err) {
+      async function (err) {
         if (err) return res.status(500).json({ success: false, message: "خطأ في قاعدة البيانات" });
 
         await transporter.sendMail({
@@ -264,6 +348,13 @@ app.post("/api/suggestion", async (req, res) => {
           `,
         });
 
+        const text = `💡 اقتراح جديد
+👤 ${name}
+📞 ${contact}
+💬 ${message}`;
+        sendTelegramMessage(text);
+        sendEmail("اقتراح جديد", text);
+
         res.json({ success: true });
       }
     );
@@ -274,8 +365,6 @@ app.post("/api/suggestion", async (req, res) => {
 });
 
 // ========================= Admin Routes =========================
-
-// تسجيل دخول الأدمن
 app.post("/api/admin/login", (req, res) => {
   const { username, password } = req.body;
   if (username === process.env.ADMIN_USER && password === process.env.ADMIN_PASS) {
@@ -285,17 +374,13 @@ app.post("/api/admin/login", (req, res) => {
   res.status(401).json({ success: false, message: "بيانات الدخول غير صحيحة" });
 });
 
-// تسجيل خروج الأدمن
 app.post("/api/admin/logout", (req, res) => {
-  req.session.destroy(err => {
-    if (err) {
-      return res.status(500).json({ success: false });
-    }
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ success: false });
     res.json({ success: true });
   });
 });
 
-// عرض الطلبات
 app.get("/api/admin/orders", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -308,7 +393,6 @@ app.get("/api/admin/orders", (req, res) => {
   });
 });
 
-// عرض الاستفسارات
 app.get("/api/admin/inquiries", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -321,7 +405,6 @@ app.get("/api/admin/inquiries", (req, res) => {
   });
 });
 
-// عرض الاقتراحات
 app.get("/api/admin/suggestions", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -334,7 +417,6 @@ app.get("/api/admin/suggestions", (req, res) => {
   });
 });
 
-// تحديث حالة الطلب
 app.post("/api/admin/update-status", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -343,20 +425,15 @@ app.post("/api/admin/update-status", (req, res) => {
     return res.status(400).json({ success: false, message: "معرّف الطلب والحالة مطلوبان" });
   }
 
-  db.run(
-    "UPDATE orders SET status = ? WHERE id = ?",
-    [status, id],
-    function(err) {
-      if (err) {
-        console.error(err);
-        return res.status(500).json({ success: false, message: "حدث خطأ أثناء التحديث" });
-      }
-      res.json({ success: true });
+  db.run("UPDATE orders SET status = ? WHERE id = ?", [status, id], function (err) {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ success: false, message: "حدث خطأ أثناء التحديث" });
     }
-  );
+    res.json({ success: true });
+  });
 });
 
-// حذف طلب
 app.delete("/api/admin/delete-order", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -365,7 +442,7 @@ app.delete("/api/admin/delete-order", (req, res) => {
     return res.status(400).json({ success: false, message: "معرّف الطلب مطلوب" });
   }
 
-  db.run("DELETE FROM orders WHERE id = ?", [id], function(err) {
+  db.run("DELETE FROM orders WHERE id = ?", [id], function (err) {
     if (err) {
       console.error(err);
       return res.status(500).json({ success: false, message: "حدث خطأ أثناء الحذف" });
@@ -374,7 +451,6 @@ app.delete("/api/admin/delete-order", (req, res) => {
   });
 });
 
-// حذف استفسار
 app.delete("/api/admin/delete-inquiry", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -383,7 +459,7 @@ app.delete("/api/admin/delete-inquiry", (req, res) => {
     return res.status(400).json({ success: false, message: "معرّف الاستفسار مطلوب" });
   }
 
-  db.run("DELETE FROM inquiries WHERE id = ?", [id], function(err) {
+  db.run("DELETE FROM inquiries WHERE id = ?", [id], function (err) {
     if (err) {
       console.error(err);
       return res.status(500).json({ success: false, message: "حدث خطأ أثناء الحذف" });
@@ -392,7 +468,6 @@ app.delete("/api/admin/delete-inquiry", (req, res) => {
   });
 });
 
-// حذف اقتراح
 app.delete("/api/admin/delete-suggestion", (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -401,7 +476,7 @@ app.delete("/api/admin/delete-suggestion", (req, res) => {
     return res.status(400).json({ success: false, message: "معرّف الاقتراح مطلوب" });
   }
 
-  db.run("DELETE FROM suggestions WHERE id = ?", [id], function(err) {
+  db.run("DELETE FROM suggestions WHERE id = ?", [id], function (err) {
     if (err) {
       console.error(err);
       return res.status(500).json({ success: false, message: "حدث خطأ أثناء الحذف" });
@@ -410,7 +485,6 @@ app.delete("/api/admin/delete-suggestion", (req, res) => {
   });
 });
 
-// رد على استفسار
 app.post("/api/admin/reply-inquiry", async (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -434,7 +508,7 @@ app.post("/api/admin/reply-inquiry", async (req, res) => {
           <hr>
           <p style="text-align: center; color: #777;">مع تحيات فريق الدعم</p>
         </div>
-      `
+      `,
     });
 
     db.run("UPDATE inquiries SET status = 'تم الرد' WHERE id = ?", [inquiryId]);
@@ -445,7 +519,6 @@ app.post("/api/admin/reply-inquiry", async (req, res) => {
   }
 });
 
-// إرسال رسالة لعميل
 app.post("/api/admin/send-message", async (req, res) => {
   if (!req.session.admin) return res.status(403).json({ success: false, message: "غير مصرح" });
 
@@ -463,12 +536,12 @@ app.post("/api/admin/send-message", async (req, res) => {
         <div dir="rtl" style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #ffa726;">${subject}</h2>
           <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; border-right: 3px solid #2196F3;">
-            ${message.replace(/\n/g, '<br>')}
+            ${message.replace(/\n/g, "<br>")}
           </div>
           <hr>
           <p style="text-align: center; color: #777;">مع تحيات فريق الدعم</p>
         </div>
-      `
+      `,
     });
 
     res.json({ success: true });
