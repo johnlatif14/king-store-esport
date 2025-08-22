@@ -1663,7 +1663,7 @@
     </div>
   </footer>
 
-  <script>
+<script>
     // منع فتح أدوات المطور
     document.addEventListener('contextmenu', function(e) {
       e.preventDefault();
@@ -1681,7 +1681,6 @@
     const bundleOptions = document.querySelectorAll('#bundleOptions .option-card');
     let selectedUC = null;
     let selectedBundle = null;
-    let currentOrderId = null; // لتخزين ID الطلب بعد إنشائه
 
     function updateTotal() {
       const total = (selectedUC?.dataset.price || 0) * 1 + (selectedBundle?.dataset.price || 0) * 1;
@@ -1747,7 +1746,7 @@
       btn.innerHTML = '<span class="spinner"></span> جاري إنشاء الطلب...';
 
       try {
-        const response = await fetch("https://king-store-esport-production.up.railway.app/api/order", {
+        const response = await fetch("/api/order", { // لا حاجة لـ URL الكامل هنا إذا كان نفس الدومين
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -1761,12 +1760,11 @@
         }
 
         if (result.success) {
-          currentOrderId = result.id; // تخزين ID الطلب
+          // بدلاً من التوجيه إلى pay.html، سنقوم بالتوجيه مباشرة إلى checkoutUrl من Cashier
           showAlert("تم إنشاء الطلب بنجاح", "جاري توجيهك لصفحة الدفع...", "success");
           
-          // إعادة توجيه لصفحة الدفع مع ID الطلب
           setTimeout(() => {
-            window.location.href = `pay.html?orderId=${currentOrderId}`;
+            window.location.href = result.checkoutUrl; // التوجيه إلى رابط دفع Cashier
           }, 1500);
 
         } else {
